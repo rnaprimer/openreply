@@ -64,6 +64,15 @@ import { TRACKED_LINK_ORDER } from "@/lib/tracking/link-order";
 import { hashRecipientId } from "@/lib/tracking/server";
 
 import { ZernioApiError } from "@/lib/zernio/client";
+// [ship] The Internet Ship boarding codes. See lib/ship/README.md.
+import {
+  applyShipPlaceholders,
+  checkShipAutomations,
+  isShipAutomation,
+  prepareShipBoarding,
+  reportShipDelivery,
+  type ShipBoarding,
+} from "@/lib/ship/worker";
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 
@@ -701,6 +710,36 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
+    // [ship] Get the boarding code BEFORE the claim below: once claimed, a
+    // failed comment counts as unconfirmed and is never retried.
+    let boarding: ShipBoarding | null = null;
+    if (isShipAutomation(automation.id)) {
+      let step;
+      try {
+        step = await prepareShipBoarding(automation, {
+          instagramAccountId,
+          commenterId,
+          commentId,
+          mediaId,
+          eventId: job.id ? String(job.id) : undefined,
+        });
+      } catch (error) {
+        if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+        await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+        throw error;
+      }
+      if (step.action === "skip") {
+        if (rateLimit?.reserved) await releaseDMSlot(instagramAccountId);
+        await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+        await prisma.dmLog.update({
+          where: { automationId_commentId: { automationId: automation.id, commentId } },
+          data: { status: step.status, matchedKeyword: matchResult.matchedKeyword, errorMessage: step.reason },
+        });
+        continue;
+      }
+      boarding = step.boarding;
+    }
+
     // With an opening DM, the private reply is a button message; tapping it
     // fires a postback that delivers the reveal (see processPostback). Without
     // one, we send the reveal text directly as today.
@@ -826,12 +865,15 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           }
         }
       } else {
-        const dmMessage = renderMessageWithTracking({
-          message: automation.dmMessage,
-          commenterName,
-          trackedLinks: automation.trackedLinks,
-          recipientToken: hashRecipientId(commenterId),
-        });
+        const dmMessage = applyShipPlaceholders(
+          renderMessageWithTracking({
+            message: automation.dmMessage,
+            commenterName,
+            trackedLinks: automation.trackedLinks,
+            recipientToken: hashRecipientId(commenterId),
+          }),
+          boarding // [ship] fills {boarding_code} / {ship_url}; never logged or stored
+        );
         await sendPrivateReply({
           context: accessToken,
           instagramAccountId: automation.instagramAccount.instagramId,
@@ -863,6 +905,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           formatError(recordError)
         )
       );
+      await reportShipDelivery(boarding, commentId, "delivered"); // [ship] best-effort
     } catch (error) {
       const sendError = classifySendError(error);
       // Retain reservations if the provider may have delivered the message.
@@ -964,6 +1007,12 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           );
         }
       }
+      await reportShipDelivery( // [ship] best-effort
+        boarding,
+        commentId,
+        delivered ? "delivered" : isDeliveryUnconfirmed(sendError) ? "unconfirmed" : "failed",
+        sendError
+      );
       await prisma.dmLog.update({
         where: { automationId_commentId: { automationId: automation.id, commentId } },
         data: {
@@ -1090,6 +1139,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
 
   if (
     !automation ||
+    isShipAutomation(automation.id) || // [ship] boarding codes go out only via processComment
     automation.instagramAccount.instagramId !== instagramAccountId ||
     !hasInstagramCredentials(automation.instagramAccount)
   ) {
@@ -1411,6 +1461,7 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
 
   if (
     !automation ||
+    isShipAutomation(automation.id) || // [ship] no follow-ups for boarding campaigns
     !automation.followUpEnabled ||
     !automation.followUpMessage?.trim() ||
     automation.instagramAccount.instagramId !== instagramAccountId ||
@@ -1479,6 +1530,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const dedupeId = `dm:${messageId}`;
 
   for (const automation of automations) {
+    if (isShipAutomation(automation.id)) continue; // [ship] boarding codes go out only via processComment
     const matchResult = automation.matchAnyWord
       ? { matched: true, matchedKeyword: null }
       : matchKeywords(
@@ -1784,6 +1836,10 @@ async function recordWorkerFailure(
 }
 
 export function createDMWorker(): Worker<DmQueueJob> {
+  // [ship] Log (ids and reasons only) any boarding automation that would be refused.
+  void checkShipAutomations((ids) =>
+    prisma.automation.findMany({ where: { id: { in: ids } }, include: { trackedLinks: { select: { slug: true } } } })
+  );
   const worker = new Worker<DmQueueJob>("dm-processing", processJob, {
     connection: getRedisConnection(),
     concurrency: 5,
