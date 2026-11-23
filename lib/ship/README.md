@@ -59,7 +59,7 @@ Create a normal automation in the dashboard:
 
   Visit: {ship_url}
 
-  This code can only be redeemed once.
+  Keep this message: the same code gets you back to your character on any phone or browser.
   ```
 - **Leave off:** tracked links, opening DM, require follow, DM keyword trigger
   and follow-up. The worker refuses ship automations that use any of them, and
