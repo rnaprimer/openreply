@@ -122,6 +122,8 @@ describe("comment polling does not recreate unsafe sends", () => {
       errorMessage: "MetaApiError 1: An unknown error has occurred.",
     },
     { status: "PENDING", attempts: 1, dmDeliveryUnconfirmed: true },
+    // Settled without a send: re-queuing it every sweep only wasted API calls.
+    { status: "SKIPPED_DEDUP", attempts: 0, dmDeliveryUnconfirmed: false },
   ])(
     "leaves an unsafe old comment alone while continuing new comments: %j",
     async (state) => {
@@ -135,4 +137,12 @@ describe("comment polling does not recreate unsafe sends", () => {
         expect(data.commentId).toBe("new");
     },
   );
+
+  it("still re-queues a SKIPPED_DEDUP comment whose public reply never landed", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { commentId: "old", status: "SKIPPED_DEDUP", attempts: 0, dmDeliveryUnconfirmed: false, publicReplySentAt: null, publicReplyDeliveryUnconfirmed: false },
+    ]);
+    await reconcileComments();
+    expect(queueAdd.mock.calls.map(([, data]) => data.commentId).sort()).toEqual(["new", "old"]);
+  });
 });

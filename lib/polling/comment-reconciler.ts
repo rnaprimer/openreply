@@ -251,7 +251,11 @@ async function sweepCampaign({
       },
     });
     const handledSet = new Set(logs.filter((log) => {
+      // SKIPPED_DEDUP is final too (the comment's one private reply went to another
+      // campaign, or the integration decided there is nothing to send). Without it
+      // here, such comments were re-queued on every sweep.
       const dmStopped = log.status === "SENT" || log.status === "SKIPPED_PLAN_LIMIT" ||
+        log.status === "SKIPPED_DEDUP" ||
         log.dmDeliveryUnconfirmed || log.attempts >= MAX_COMMENT_SEND_ATTEMPTS ||
         (log.status === "FAILED" && hasLegacyUnconfirmedDelivery(log.errorMessage));
       const replyStopped = !automation.publicReplyEnabled ||

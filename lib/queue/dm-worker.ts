@@ -477,7 +477,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
+    // A DM leg recorded as SKIPPED_DEDUP is settled: the comment's single private
+    // reply went to another campaign, or there was nothing to send. Only the
+    // public reply may still need a retry.
     const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed &&
+      existingLog?.status !== "SKIPPED_DEDUP" &&
       (existingLog?.attempts ?? 0) < MAX_COMMENT_SEND_ATTEMPTS;
 
     // Skip only when there is genuinely nothing left to do. A comment whose DM

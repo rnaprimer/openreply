@@ -517,6 +517,22 @@ describe("Ship boarding — nothing to send", () => {
     );
   });
 
+  it("a comment already settled as SKIPPED_DEDUP is not sent to the ship again", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue({
+      status: "SKIPPED_DEDUP",
+      attempts: 0,
+      dmDeliveryUnconfirmed: false,
+      publicReplySentAt: new Date(),
+      errorMessage: "Already aboard the ship: no new boarding code",
+    });
+    const processor = getProcessor();
+    await processor(createMockJob());
+    expect(shipCalls).toHaveLength(0);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(dmClaimCalls()).toHaveLength(0);
+    expect(mockReserveDMSlot).not.toHaveBeenCalled();
+  });
+
   it("leaves non-ship automations untouched", async () => {
     mockPrisma.automation.findMany.mockResolvedValue([mockAutomation]);
     const processor = getProcessor();
